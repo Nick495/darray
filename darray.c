@@ -173,18 +173,19 @@ static int darray_ensure_size(struct darray *d, const size_t val_size)
 	}
 
 	/* Two is not necessarily the best expansion factor */
-	const size_t asize = val_size * (d->cap * 2);
-	if (asize < d->cap) {
+	const size_t asize = d->dsize * 2;
+	if (asize < d->dsize) {
 		rc = 1;
 		goto fail_int_overflow;
 	}
-	assert(asize > d->cap);
+	assert(asize > d->dsize);
 
 	if ((rc = darray_alloc_array(d, asize))) {
 		goto fail_darray_alloc_array;
 	}
 	assert(d->data != NULL);
 	d->cap = d->cap * 2;
+	d->dsize = asize;
 
 	/* Post_conditions. */
 	assert(d->data != NULL);
@@ -451,14 +452,14 @@ int darray_init(struct darray *d, const size_t init_size, const size_t val_size,
 	/* Psuedo postcondition for above. */
 	assert(d->path[dir_len + name_len + ext_len + 2] == '\0');
 
-	/* Allocate space for the array. */
-	const size_t asize = val_size * d->cap;
-	if (asize <= d->cap) { /* Int overflow */
+	d->dsize = d->cap * val_size;
+	if (d->dsize < d->cap) {
 		rc = 2;
-		goto fail_asize_overflow;
+		goto fail_dsize_overflow;
 	}
+	assert(d->dsize > d->cap);
 
-	if ((rc = darray_alloc_array(d, asize))) {
+	if ((rc = darray_alloc_array(d, d->dsize))) {
 		rc += 2; /* Don't duplicate previous error codes. */
 		goto fail_darray_alloc_array;
 	}
@@ -501,7 +502,7 @@ int darray_init(struct darray *d, const size_t init_size, const size_t val_size,
 	return 0;
 
 fail_darray_alloc_array:
-fail_asize_overflow:
+fail_dsize_overflow:
 	free(d->path);
 fail_path_malloc:
 	assert(rc != 0);
@@ -518,8 +519,8 @@ void darray_free(struct darray *d, size_t val_size)
 #ifdef MALLOC
 	free(d->data);
 #else
-	msync(d->data, d->use * val_size, MS_SYNC);
-	munmap(d->data, val_size);
+	msync(d->data, d->dsize, MS_SYNC);
+	munmap(d->data, d->dsize);
 #endif
 	d->use = d->cap = 0;
 	d->data = NULL;
