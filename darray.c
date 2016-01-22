@@ -26,10 +26,15 @@ typedef void (*get_func)(const struct darray *, const size_t, void *);
  * TODO: Find a way to pretty-up the polymorphism here?
  * 	Specifically in darray_*_push(), darray_*_get(), as well as the switch() in
  * 	darray_init().
+ * 	Also find a way to pretty-up the SERIAL vs NOSERIAL code. #define is ugly.
  *
- * TODO: Refactor to make darray->cap be the literal amount of bytes addressed.
+ * TODO: Re-write darray to use cap = literal bytes allocated for serialization
+ * and deserialization purposes.
+ *
+ * TODO: Add a setting to set the darray to store a bitarray. (A type was used
+ * last time. Also figure out a good way to set this setting).
+ *
  * TODO: Finalize error handling.
- *
 */
 struct darray {
 	uint64_t use;
@@ -94,6 +99,10 @@ static int darray_alloc_array(struct darray *d, const size_t asize)
 	assert(new_data != NULL);
 #else
 	struct stat statb;
+	/* TODO: Change the below code to continue on if the stat() error is that
+	 * the file isn't found so that it can be created instead. Basically all
+	 * that needs to happen is statb.st_size needs to be set to zero.
+	*/
 	if ((rc = stat(d->path, &statb))) {
 		rc = 3;
 		goto fail_stat;
@@ -163,19 +172,19 @@ static int darray_ensure_size(struct darray *d, const size_t val_size)
 		return 0;
 	}
 
-	const size_t new_cap = d->cap * 2; /* Add sophistication as needed. */
-	if (new_cap < d->cap) {
+	/* Two is not necessarily the best expansion factor */
+	const size_t asize = val_size * (d->cap * 2);
+	if (asize < d->cap) {
 		rc = 1;
 		goto fail_int_overflow;
 	}
-	assert(new_cap > d->cap);
+	assert(asize > d->cap);
 
-	const size_t asize = new_cap * val_size;
 	if ((rc = darray_alloc_array(d, asize))) {
 		goto fail_darray_alloc_array;
 	}
 	assert(d->data != NULL);
-	d->cap = new_cap;
+	d->cap = d->cap * 2;
 
 	/* Post_conditions. */
 	assert(d->data != NULL);
@@ -212,8 +221,23 @@ fail_darray_ensure_size:
 	return rc;
 }
 
+static void darray_uint8_get(const struct darray *d, const size_t ind, void *v)
+{
+	assert(d->use <= d->cap);
+	assert(ind <= d->use);
+
+	const size_t rind = ind * sizeof(uint8_t);
+#if NOSERIAL
+	memcpy(v, &d->data[rind], sizeof(uint8_t));
+#else
+	*((uint8_t *)v) = ((uint8_t)d->data[rind] << 0);
+#endif
+	return;
+}
+
 static int darray_uint16_push(struct darray *d, const void *v)
-{ /* Preconditions */
+{
+	/* Preconditions */
 	assert(d->use <= d->cap);
 
 	int rc = 0;
@@ -234,6 +258,21 @@ static int darray_uint16_push(struct darray *d, const void *v)
 fail_darray_ensure_size:
 	assert(rc != 0);
 	return rc;
+}
+
+static void darray_uint16_get(const struct darray *d, const size_t ind, void *v)
+{
+	assert(d->use <= d->cap);
+	assert(ind <= d->use);
+
+	const size_t rind = ind * sizeof(uint16_t);
+#if NOSERIAL
+	memcpy(v, &d->data[rind], sizeof(uint16_t));
+#else
+	*((uint16_t *)v) =
+		(((uint16_t)d->data[rind] << 8) | ((uint16_t)d->data[rind+1] << 0));
+#endif
+	return;
 }
 
 static int darray_uint32_push(struct darray *d, const void *v)
@@ -261,6 +300,22 @@ static int darray_uint32_push(struct darray *d, const void *v)
 fail_darray_ensure_size:
 	assert(rc != 0);
 	return rc;
+}
+
+static void darray_uint32_get(const struct darray *d, const size_t ind, void *v)
+{
+	assert(d->use <= d->cap);
+	assert(ind <= d->use);
+
+	const size_t rind = ind * sizeof(uint32_t);
+#if NOSERIAL
+	memcpy(v, &d->data[rind], sizeof(uint32_t));
+#else
+	*((uint32_t *)v) =
+		(((uint32_t)d->data[rind] << 24) | ((uint32_t)d->data[rind+1] << 16) |
+		((uint32_t)d->data[rind+2] << 8) | ((uint32_t)d->data[rind+3] << 0));
+#endif
+	return;
 }
 
 static int darray_uint64_push(struct darray *d, const void *v)
@@ -294,87 +349,10 @@ fail_darray_ensure_size:
 	return rc;
 }
 
-static int darray_bmap_push(struct darray *d, const void *v)
-{
-	/* Preconditions */
-	assert(d->use <= d->cap);
-
-	int rc = 0;
-	if ((rc = darray_ensure_size(d, sizeof(unsigned int)))) {
-		goto fail_darray_ensure_size;
-	}
-	assert(d->use < d->cap);
-
-	const size_t rind = d->use++;
-#if NOSERIAL
-	memcpy(&d->data[rind], v, sizeof(uint64_t));
-#else
-	d->data[rind + 0] = (*((const uint64_t *) v) >> 56);
-	d->data[rind + 1] = (*((const uint64_t *) v) >> 48);
-	d->data[rind + 2] = (*((const uint64_t *) v) >> 40);
-	d->data[rind + 3] = (*((const uint64_t *) v) >> 32);
-	d->data[rind + 4] = (*((const uint64_t *) v) >> 24);
-	d->data[rind + 5] = (*((const uint64_t *) v) >> 16);
-	d->data[rind + 6] = (*((const uint64_t *) v) >> 8);
-	d->data[rind + 7] = (*((const uint64_t *) v) >> 0);
-#endif
-	return 0;
-
-fail_darray_ensure_size:
-	assert(rc != 0);
-	return rc;
-
-}
-
-static void darray_uint8_get(const struct darray *d, const size_t ind, void *v)
-{
-	assert(d->use <= d->cap);
-	assert(ind < d->use);
-
-	const size_t rind = ind * sizeof(uint8_t);
-#if NOSERIAL
-	memcpy(v, &d->data[rind], sizeof(uint8_t));
-#else
-	*((uint8_t *)v) = ((uint8_t)d->data[rind] << 0);
-#endif
-	return;
-}
-
-static void darray_uint16_get(const struct darray *d, const size_t ind, void *v)
-{
-	assert(d->use <= d->cap);
-	assert(ind < d->use);
-
-	const size_t rind = ind * sizeof(uint16_t);
-#if NOSERIAL
-	memcpy(v, &d->data[rind], sizeof(uint16_t));
-#else
-	*((uint16_t *)v) =
-		(((uint16_t)d->data[rind] << 8) | ((uint16_t)d->data[rind+1] << 0));
-#endif
-	return;
-}
-
-static void darray_uint32_get(const struct darray *d, const size_t ind, void *v)
-{
-	assert(d->use <= d->cap);
-	assert(ind < d->use);
-
-	const size_t rind = ind * sizeof(uint32_t);
-#if NOSERIAL
-	memcpy(v, &d->data[rind], sizeof(uint32_t));
-#else
-	*((uint32_t *)v) =
-		(((uint32_t)d->data[rind] << 24) | ((uint32_t)d->data[rind+1] << 16) |
-		((uint32_t)d->data[rind+2] << 8) | ((uint32_t)d->data[rind+3] << 0));
-#endif
-	return;
-}
-
 static void darray_uint64_get(const struct darray *d, const size_t ind, void *v)
 {
 	assert(d->use <= d->cap);
-	assert(ind < d->use);
+	assert(ind <= d->use);
 
 	const size_t rind = ind * sizeof(uint64_t);
 #if NOSERIAL
@@ -386,6 +364,47 @@ static void darray_uint64_get(const struct darray *d, const size_t ind, void *v)
 		((uint64_t)d->data[rind+4] << 24) | ((uint64_t)d->data[rind+5] << 16) |
 		((uint64_t)d->data[rind+6] << 8) | ((uint64_t)d->data[rind+7] << 0));
 #endif
+	return;
+}
+
+static int darray_bset_push(struct darray *d, const void *v)
+{
+	/* Preconditions */
+	assert(d->use <= d->cap);
+
+	int rc = 0;
+	/* Note, we reserve space for the largest possible integer (uint64_t) so
+	 * that no matter what architecture we're working on, it will be able to
+	 * operate at its native word size for maximum efficiency. (Bitsets are
+	 * endian independent, so the only portability issue is wordsize).
+	*/
+	if ((rc = darray_ensure_size(d, sizeof(uint64_t)))) {
+		goto fail_darray_ensure_size;
+	}
+	assert(d->use < d->cap);
+
+	const size_t rind = d->use / sizeof(unsigned int);
+	const size_t roff = d->use++ % sizeof(unsigned int);
+
+	d->data[rind] |= *((const unsigned int *) v) == 0 ? 0 : 1 << roff;
+
+	assert(d->use <= d->cap);
+	return 0;
+
+fail_darray_ensure_size:
+	assert(rc != 0);
+	return rc;
+}
+
+static void darray_bset_get(const struct darray *d, const size_t ind, void *v)
+{
+	assert(d->use <= d->cap);
+	assert(ind <= d->use);
+
+	const size_t rind = ind / sizeof(unsigned int);
+	const size_t roff = ind % sizeof(unsigned int);
+
+	*((unsigned int *) v) = d->data[rind] & (1 << roff);
 	return;
 }
 
@@ -462,6 +481,11 @@ int darray_init(struct darray *d, const size_t init_size, const size_t val_size,
 		d->push = darray_uint64_push;
 		d->get = darray_uint64_get;
 		break;
+	/* changeme */
+	case 12:
+		d->push = darray_bset_push;
+		d->get = darray_bset_get;
+		break;
 	default:
 		break;
 	}
@@ -521,6 +545,30 @@ void darray_print_all(struct darray *d)
 		uint32_t val;
 		d->get(d, i, &val);
 		printf("%4u ", val);
+		if ((i - 1) % 100 == 0) {
+			printf("\n");
+		}
+	}
+	printf("\n");
+	return;
+}
+
+void darray_bset_print_all(struct darray *d)
+{
+	assert(d->path != NULL);
+	assert(d->data != NULL);
+	assert(d->use <= d->cap);
+
+	unsigned int val = 0;
+	printf("Darray %s:\n", d->path);
+	for (size_t i = 0; i < d->use; ++i) {
+		d->get(d, i, &val);
+		if (val) {
+			printf("%4zu ", i);
+		}
+		if ((i - 1) % 100 == 0) {
+			printf("\n");
+		}
 	}
 	printf("\n");
 	return;
@@ -531,7 +579,7 @@ int main(void)
 {
 	int rc = 0;
 	struct darray d;
-	if ((rc = darray_init(&d, 0, sizeof(uint32_t),
+	if ((rc = darray_init(&d, 0, sizeof(unsigned int),
 			"/Users/nick/scratch/mmap_dynamic_array", "test", "eves"))) {
 		printf("Error. %d\n", rc);
 		goto fail_darray_init;
