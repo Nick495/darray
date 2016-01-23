@@ -57,7 +57,7 @@ static void darray_uint64_get(const struct darray *d,const size_t ind, void *v);
 static int darray_bset_push(struct darray *d, const void *v);
 static void darray_bset_get(const struct darray *d, const size_t ind, void *v);
 
-enum TYPE {UNSIGNED_INT, BITSET};
+enum VALUE_TYPE {UNSIGNED_INT, BITSET};
 
 #ifndef MALLOC
 static int darray_extend_file(struct darray *d, const size_t new_alloc)
@@ -218,7 +218,7 @@ fail_int_overflow:
 	return rc;
 }
 
-int darray_init(struct darray *d, const enum TYPE val_type,
+int darray_init(struct darray *d, const enum VALUE_TYPE val_type,
 		const size_t init_size, const size_t val_size,
 		const char *dir, const char *name, const char *ext)
 {
@@ -638,8 +638,8 @@ int main(void)
 	int rc = 0;
 	struct darray d;
 
-	const enum TYPE t = UNSIGNED_INT;
-	//const enum TYPE t = BITSET;
+	const enum VALUE_TYPE t = UNSIGNED_INT;
+	//const enum VALUE_TYPE t = BITSET;
 
 	if ((rc = darray_init(&d, t, 0, sizeof(uint64_t),
 			"/Users/nick/scratch/mmap_dynamic_array", "test", "eves"))) {
