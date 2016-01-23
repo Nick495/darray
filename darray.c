@@ -653,10 +653,11 @@ static int darray_uint8_push(struct darray *d, const void *v)
 
 	const size_t rind = d->use++ * sizeof(uint8_t);
 	assert(rind >= d->use - 1);
+	unsigned char *rdata = d->data + HEADER_LENGTH;
 #if NOSERIAL
-	memcpy(&d->data[rind] + HEADER_LENGTH, v, sizeof(uint8_t));
+	memcpy(rdata[rind], v, sizeof(uint8_t));
 #else
-	*(HEADER_LENGTH + &d->data[rind + 0]) = (*((const uint8_t *) v) >> 0);
+	rdata[rind] = (*((const uint8_t *) v) >> 0);
 #endif
 	return 0;
 
@@ -673,11 +674,12 @@ static void darray_uint8_get(const struct darray *d, const size_t ind, void *v)
 	assert(d->lsize >= d->cap);
 
 	const size_t rind = ind * sizeof(uint8_t);
+	const unsigned char *rdata = d->data + HEADER_LENGTH;
 	assert(rind >= ind - 1);
 #if NOSERIAL
-	memcpy(v, &d->data[rind] + HEADER_LENGTH, sizeof(uint8_t));
+	memcpy(v, rdata[rind], sizeof(uint8_t));
 #else
-	*((uint8_t *)v) = ((uint8_t)*(HEADER_LENGTH + &d->data[rind]) << 0);
+	*((uint8_t *)v) = ((uint8_t)rdata[rind] << 0);
 #endif
 	return;
 }
@@ -695,12 +697,13 @@ static int darray_uint16_push(struct darray *d, const void *v)
 	assert(d->use < d->cap);
 
 	const size_t rind = d->use++ * sizeof(uint16_t);
+	unsigned char *rdata = d->data + HEADER_LENGTH;
 	assert(rind >= d->use - 1);
 #if NOSERIAL
-	memcpy(&d->data[rind] + HEADER_LENGTH, v, sizeof(uint16_t));
+	memcpy(rdata[rind], v, sizeof(uint16_t));
 #else
-	*(HEADER_LENGTH + &d->data[rind + 0]) = (*((const uint16_t *) v) >> 8);
-	*(HEADER_LENGTH + &d->data[rind + 1]) = (*((const uint16_t *) v) >> 0);
+	rdata[rind] = (*((const uint16_t *) v) >> 8);
+	rdata[rind + 1] = (*((const uint16_t *) v) >> 0);
 #endif
 	return 0;
 
@@ -717,12 +720,12 @@ static void darray_uint16_get(const struct darray *d, const size_t ind, void *v)
 	assert(d->lsize >= d->cap);
 
 	const size_t rind = ind * sizeof(uint16_t);
+	const unsigned char *rdata = d->data + HEADER_LENGTH;
 #if NOSERIAL
-	memcpy(v, &d->data[rind] + HEADER_LENGTH, sizeof(uint16_t));
+	memcpy(v, rdata[rind], sizeof(uint16_t));
 #else
 	*((uint16_t *)v) =
-		(((uint16_t)*(HEADER_LENGTH + &d->data[rind]) << 8) |
-		 ((uint16_t)*(HEADER_LENGTH + &d->data[rind+1]) << 0));
+		(((uint16_t)rdata[rind] << 8) | ((uint16_t)rdata[rind + 1] << 0));
 #endif
 	return;
 }
@@ -740,14 +743,15 @@ static int darray_uint32_push(struct darray *d, const void *v)
 	assert(d->use < d->cap);
 
 	const size_t rind = d->use++ * sizeof(uint32_t);
+	unsigned char *rdata = d->data + HEADER_LENGTH;
 	assert(rind >= d->use - 1);
 #if NOSERIAL
-	memcpy(&d->data[rind] + HEADER_LENGTH, v, sizeof(uint32_t));
+	memcpy(rdata[rind], v, sizeof(uint32_t));
 #else
-	*(HEADER_LENGTH + &d->data[rind + 0]) = (*((const uint32_t *) v) >> 24);
-	*(HEADER_LENGTH + &d->data[rind + 1]) = (*((const uint32_t *) v) >> 16);
-	*(HEADER_LENGTH + &d->data[rind + 2]) = (*((const uint32_t *) v) >> 8);
-	*(HEADER_LENGTH + &d->data[rind + 3]) = (*((const uint32_t *) v) >> 0);
+	rdata[rind] = (*((const uint32_t *) v) >> 24);
+	rdata[rind + 1] = (*((const uint32_t *) v) >> 16);
+	rdata[rind + 2] = (*((const uint32_t *) v) >> 8);
+	rdata[rind + 3] = (*((const uint32_t *) v) >> 0);
 #endif
 	return 0;
 
@@ -764,14 +768,13 @@ static void darray_uint32_get(const struct darray *d, const size_t ind, void *v)
 	assert(d->lsize >= d->cap);
 
 	const size_t rind = ind * sizeof(uint32_t);
+	const unsigned char *rdata = d->data + HEADER_LENGTH;
 #if NOSERIAL
-	memcpy(v, &d->data[rind] + HEADER_LENGTH, sizeof(uint32_t));
+	memcpy(v, rdata[rind], sizeof(uint32_t));
 #else
 	*((uint32_t *)v) =
-		(((uint32_t)*(HEADER_LENGTH + &d->data[rind]) << 24) |
-		 ((uint32_t)*(HEADER_LENGTH + &d->data[rind+1]) << 16) |
-		((uint32_t)*(HEADER_LENGTH + &d->data[rind+2]) << 8) |
-		((uint32_t)*(HEADER_LENGTH + &d->data[rind+3]) << 0));
+		(((uint32_t)rdata[rind] << 24) | ((uint32_t)rdata[rind + 1] << 16) |
+		 ((uint32_t)rdata[rind + 2] << 8) | ((uint32_t)rdata[rind + 3] << 0));
 #endif
 	return;
 }
@@ -790,17 +793,18 @@ static int darray_uint64_push(struct darray *d, const void *v)
 
 	const size_t rind = d->use++ * sizeof(uint64_t);
 	assert(rind >= d->use - 1);
+	unsigned char *rdata = d->data + HEADER_LENGTH;
 #if NOSERIAL
-	memcpy(&d->data[rind] + HEADER_LENGTH, v, sizeof(uint64_t));
+	memcpy(rdata[rind], v, sizeof(uint64_t));
 #else
-	*(HEADER_LENGTH + &d->data[rind + 0]) = (*((const uint64_t *) v) >> 56);
-	*(HEADER_LENGTH + &d->data[rind + 1]) = (*((const uint64_t *) v) >> 48);
-	*(HEADER_LENGTH + &d->data[rind + 2]) = (*((const uint64_t *) v) >> 40);
-	*(HEADER_LENGTH + &d->data[rind + 3]) = (*((const uint64_t *) v) >> 32);
-	*(HEADER_LENGTH + &d->data[rind + 4]) = (*((const uint64_t *) v) >> 24);
-	*(HEADER_LENGTH + &d->data[rind + 5]) = (*((const uint64_t *) v) >> 16);
-	*(HEADER_LENGTH + &d->data[rind + 6]) = (*((const uint64_t *) v) >> 8);
-	*(HEADER_LENGTH + &d->data[rind + 7]) = (*((const uint64_t *) v) >> 0);
+	rdata[rind] = (*((const uint64_t *) v) >> 56);
+	rdata[rind + 1] = (*((const uint64_t *) v) >> 48);
+	rdata[rind + 2] = (*((const uint64_t *) v) >> 40);
+	rdata[rind + 3] = (*((const uint64_t *) v) >> 32);
+	rdata[rind + 4] = (*((const uint64_t *) v) >> 24);
+	rdata[rind + 5] = (*((const uint64_t *) v) >> 16);
+	rdata[rind + 6] = (*((const uint64_t *) v) >> 8);
+	rdata[rind + 7] = (*((const uint64_t *) v) >> 0);
 #endif
 	return 0;
 
@@ -817,18 +821,15 @@ static void darray_uint64_get(const struct darray *d, const size_t ind, void *v)
 	assert(d->lsize >= d->cap);
 
 	const size_t rind = ind * sizeof(uint64_t);
+	const unsigned char *rdata = d->data + HEADER_LENGTH;
 #if NOSERIAL
-	memcpy(v, &d->data[rind] + HEADER_LENGTH, sizeof(uint64_t));
+	memcpy(v, &rdata[rind], sizeof(uint64_t));
 #else
 	*((uint64_t *)v) =
-		(((uint64_t)*(HEADER_LENGTH + &d->data[rind]) << 56) |
-		 ((uint64_t)*(HEADER_LENGTH + &d->data[rind+1]) << 48) |
-		((uint64_t)*(HEADER_LENGTH + &d->data[rind+2]) << 40) |
-		((uint64_t)*(HEADER_LENGTH + &d->data[rind+3]) << 32) |
-		((uint64_t)*(HEADER_LENGTH + &d->data[rind+4]) << 24) |
-		((uint64_t)*(HEADER_LENGTH + &d->data[rind+5]) << 16) |
-		((uint64_t)*(HEADER_LENGTH + &d->data[rind+6]) << 8) |
-		((uint64_t)*(HEADER_LENGTH + &d->data[rind+7]) << 0));
+		(((uint64_t)rdata[rind] << 56) | ((uint64_t)rdata[rind + 1] << 48) |
+		((uint64_t)rdata[rind + 2] << 40) | ((uint64_t)rdata[rind + 3] << 32) |
+		((uint64_t)rdata[rind + 4] << 24) | ((uint64_t)rdata[rind + 5] << 16) |
+		((uint64_t)rdata[rind + 6] << 8) | ((uint64_t)rdata[rind + 7] << 0));
 #endif
 	return;
 }
@@ -844,14 +845,14 @@ static int darray_bset_push(struct darray *d, const void *v)
 	}
 	assert(d->use < d->cap);
 
+	unsigned char *rdata = d->data + HEADER_LENGTH;
 	const size_t rind = d->use / (sizeof(unsigned int));
 	const size_t roff = d->use++ % (sizeof(unsigned int));
 
-	/* TODO: Fix this math. */
 	if ((*(const unsigned int *)v)) {
-		*(&d->data[rind] + HEADER_LENGTH) |= (1 << roff);
+		rdata[rind] |= (1 << roff);
 	} else {
-		*(&d->data[rind] + HEADER_LENGTH) &= ~(1 << roff);
+		rdata[rind] &= ~(1 << roff);
 	}
 
 	return 0;
@@ -869,8 +870,9 @@ static void darray_bset_get(const struct darray *d, const size_t ind, void *v)
 
 	const size_t rind = ind / (sizeof(unsigned int));
 	const size_t roff = ind % (sizeof(unsigned int));
+	const unsigned char *rdata = d->data + HEADER_LENGTH;
 
-	*((unsigned int *) v) = *(&d->data[rind] + HEADER_LENGTH) & (1 << roff);
+	*((unsigned int *) v) = rdata[rind] & (1 << roff);
 	return;
 }
 
@@ -902,8 +904,7 @@ static void darray_bset_print_all(struct darray *d)
 
 	unsigned int val = 0;
 	printf("Darray %s:\n", d->path);
-	for (size_t i = 0; i < 10000000; ++i) {
-	//for (size_t i = 0; i < d->use; ++i) { TEST
+	for (size_t i = 0; i < d->use; ++i) {
 		d->get(d, i, &val);
 		if (val) {
 			printf("%4zu ", i);
@@ -915,7 +916,6 @@ static void darray_bset_print_all(struct darray *d)
 	printf("\n");
 	return;
 }
-
 
 #if TEST
 int main(void)
