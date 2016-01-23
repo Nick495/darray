@@ -1,11 +1,4 @@
-#include <stdlib.h>
-#include <assert.h>
-#include <sys/mman.h>
-#include <string.h> /* strlen(), memcpy() */
-#include <fcntl.h>	/* open() */
-#include <unistd.h>	/* close() */
-#include <sys/stat.h> /* struct stat, stat() */
-
+#include "darray.h"
 #include <stdio.h> /* DEBUG */
 
 /*
@@ -56,8 +49,6 @@ static int darray_uint64_push(struct darray *d, const void *v);
 static void darray_uint64_get(const struct darray *d,const size_t ind, void *v);
 static int darray_bset_push(struct darray *d, const void *v);
 static void darray_bset_get(const struct darray *d, const size_t ind, void *v);
-
-enum VALUE_TYPE {UNSIGNED_INT, BITSET};
 
 #ifndef MALLOC
 static int darray_extend_file(struct darray *d, const size_t new_alloc)
