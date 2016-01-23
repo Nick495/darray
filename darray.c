@@ -24,6 +24,7 @@ enum TYPE {UNSIGNED_INT, BITSET};
  * manage for this phenomon is that malloc() is using mmap() as it's back end
  * for large allocations, and therefore the 5% represents the locking and
  * other overhead associated with malloc() itself.
+ *
  * TODO: Find a way to pretty-up the polymorphism here?
  * 	Specifically in darray_*_push(), darray_*_get(), as well as the switch() in
  * 	darray_init().
@@ -32,6 +33,8 @@ enum TYPE {UNSIGNED_INT, BITSET};
  * TODO: Implement persistance.
  *
  * TODO: Finalize error handling.
+ *
+ * TODO: Double check with someone else that the bitarray is being used properly
 */
 struct darray {
 	uint64_t use;
@@ -170,23 +173,24 @@ static int darray_ensure_size(struct darray *d)
 	}
 	/* Otherwise extend the size of the array to make room for the insert. */
 
-	/* Two is not necessarily the best expansion factor */
-	const size_t asize = d->dsize * 2;
-	if (asize < d->dsize) {
+	const int expn_factor = 2; /* Replace as needed. */
+	const size_t new_size = d->dsize * expn_factor;
+	const size_t new_cap = d->cap * expn_factor;
+	if ((new_size < d->dsize) || (new_cap < d->cap)) {
 		rc = 1;
 		goto fail_int_overflow;
 	}
+	assert(new_size > d->dsize);
+	assert(new_cap > d->cap);
 
-	assert(asize > d->dsize);
-
-	if ((rc = darray_alloc_array(d, asize))) {
+	if ((rc = darray_alloc_array(d, new_size))) {
 		rc += 1; /* Don't clobber existing error codes. */
 		goto fail_darray_alloc_array;
 	}
 
 	assert(d->data != NULL);
-	d->cap = d->cap * 2; /* Safe since d->size * 2 worked */
-	d->dsize = asize;
+	d->cap = new_cap;
+	d->dsize = new_size;
 
 	/* Post_conditions. */
 	assert(d->data != NULL);
@@ -621,16 +625,16 @@ int main(void)
 	int rc = 0;
 	struct darray d;
 
-	//const enum TYPE t = UNSIGNED_INT;
-	const enum TYPE t = BITSET;
+	const enum TYPE t = UNSIGNED_INT;
+	//const enum TYPE t = BITSET;
 
-	if ((rc = darray_init(&d, t, 0, sizeof(unsigned int),
+	if ((rc = darray_init(&d, t, 0, sizeof(uint64_t),
 			"/Users/nick/scratch/mmap_dynamic_array", "test", "eves"))) {
 		printf("Error. %d\n", rc);
 		goto fail_darray_init;
 	}
 
-	for (unsigned int i = 0; i < 10000000; ++i) {
+	for (uint64_t i = 0; i < 10000000; ++i) {
 		if ((rc = d.push(&d, &i))) {
 			printf("Error, malloc.\n");
 			goto fail_darray_append;
