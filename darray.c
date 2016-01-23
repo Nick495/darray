@@ -33,8 +33,7 @@ struct darray {
 	/* items below this point are not saved persistently, they're recreated
 	 * by init().
 	*/
-	int fd;
-	size_t dsize;
+	size_t lsize; /* Literal size of the backend. */
 	char *path;
 	unsigned char *data;
 	int (*push)(struct darray *, const void *);
@@ -53,12 +52,23 @@ static int darray_bset_push(struct darray *d, const void *v);
 static void darray_bset_get(const struct darray *d, const size_t ind, void *v);
 
 #ifndef MALLOC
-static int darray_stretch_size(struct darray *d, const size_t alloc_size)
+/* TODO: Change semantics to take in a fd and return an error code? */
+/*
+ * Stretches the file backend of the given darray to size new_size, so that
+ * it can be mmap()'d to the new size.
+ *
+ * Assumes that the first argument points to a darray with a d->path pointing to
+ * a valid location in the filesystem.
+ *
+ * Returns a file descriptor to the path on success, a negative error code
+ * otherwise.
+*/
+static int darray_stretch_size(struct darray *d, const size_t new_size)
 {
 	/* Preconditions */
 	assert(d != NULL);
 	assert(d->path != NULL);
-	assert(alloc_size > 0);
+	assert(new_size > 0);
 
 	int rc = 0;
 	const int fd = open(d->path, O_RDWR|O_CREAT|O_NOFOLLOW);
@@ -67,7 +77,7 @@ static int darray_stretch_size(struct darray *d, const size_t alloc_size)
 		goto fail_open;
 	}
 
-	if (lseek(fd, alloc_size, SEEK_SET) == -1) {
+	if (lseek(fd, new_size, SEEK_SET) == -1) {
 		rc = -2;
 		goto fail_lseek;
 	}
@@ -77,28 +87,27 @@ static int darray_stretch_size(struct darray *d, const size_t alloc_size)
 		goto fail_write;
 	}
 
-	assert(fd >= 0);
+	assert(fd > 0);
 	return fd;
 
 fail_write:
 fail_lseek:
 	close(fd);
 fail_open:
-	assert(rc != 0);
+	assert(rc <= 0);
 	return rc;
 }
 #endif
 
-static int darray_alloc(struct darray *d, size_t alloc_size)
+#ifndef MALLOC
+static int darray_alloc_mmap(struct darray *d, size_t desired_size)
 {
 	/* Preconditions */
 	assert(d != NULL);
 	assert(d->path != NULL);
-	assert(d->use >= 0);
 
 	int rc = 0; 
 
-#ifndef MALLOC
 	struct stat statb;
 	/* TODO: Change the below code to continue on if the stat() error is that
 	 * the file isn't found so that it can be created instead. Basically all
@@ -109,89 +118,127 @@ static int darray_alloc(struct darray *d, size_t alloc_size)
 		goto fail_stat;
 	}
 
-	int fd;
-	/* Special case, darray_init() is looking for a serialized darray */
-	if (alloc_size == 0) {
-		if (statb.st_size == 0) { /* Nothing here, report back. */
-			return 1;
-		} else { /* Map it as is */
-			if ((fd = open(d->path, O_RDWR|O_NOFOLLOW)) < 0) {
-				rc = -2;
-				goto fail_open;
-			}
-			/* Note, the line below is the critical difference between this case
-			 * and the more general case where alloc_size <= statb.st_size. The
-			 * rest of the code implicitly assumes that d->cap is proportional
-			 * to d->dsize. (i.e. ensure_size)
-			 * This line would break that assumption in general, and therefore
-			 * cause the file to grow much more rapidly than is prudent. Until
-			 * the code is refactored (which would involve making this function 
-			 * value_size aware and having it literally compute the d->cap field
-			 * to ensure that the property is retained) these two cases can't be
-			 * merged. 
-			*/
-			alloc_size = statb.st_size;
-		}
-	} else { /* Standard case. */
-		if (alloc_size <= (size_t)statb.st_size) {
-			/* The file is big enough, so map it as is */
-			if ((fd = open(d->path, O_RDWR|O_NOFOLLOW)) < 0) {
-				rc = -2;
-				goto fail_open;
-			}
-		} else {
-			/* Extend the file as needed */
-			if ((fd = darray_stretch_size(d, alloc_size)) < 0) {
-				rc = -3;
-				goto fail_extend_file;
-			}
-		} 
+	int fd = -1;
+	if ((desired_size == 0) && (statb.st_size == 0)) {
+		/* Attempt to map the file as-is. */
+		return 1; /* Not an error condition, so we don't jump to fail_* */
 	}
+
+	if (desired_size <= (size_t)statb.st_size) {
+		if ((fd = open(d->path, O_RDWR|O_NOFOLLOW)) < 0) {
+			rc = -3;
+			goto fail_open;
+		}
+		/* WARNING: for optimal (and, as the back-end grows larger,  reasonable,
+		 * file size usage, this line assumes that this program (or some
+		 * version thereof) is the only thing which can extend the back-end's
+		 * file size.
+		 *
+		 * This is due to the below line, which otherwise would have to be
+		 * made a special case for desired_size == 0 and creates ugly code.
+		*/
+		desired_size = statb.st_size;
+	} else {
+		/* Extend the file as needed */
+		if ((fd = darray_stretch_size(d, desired_size)) < 0) {
+			rc = -4;
+			goto fail_extend_file;
+		}
+	} 
+
 	assert(fd > 0);
 
 	void *new_data
-		= mmap(0, alloc_size, PROT_READ|PROT_WRITE, MAP_FILE|MAP_SHARED, fd, 0);
+		= mmap(0, desired_size, PROT_READ|PROT_WRITE, MAP_FILE|MAP_SHARED, fd, 0);
 	if (!new_data) {
-		rc = -4;
+		rc = -5;
 		goto fail_mmap;
 	}
 
 	if (close(fd) == -1) {
-		rc = -5;
+		rc = -6;
 		goto fail_close;
 	}
-#else
-	void *new_data = realloc(d->data, alloc_size);
-	if (!new_data) {
-		rc = -6;
-		goto fail_darray_extend;
-	}
-#endif
 
 	assert(new_data != NULL);
 	d->data = new_data;
-	d->dsize = alloc_size;
+	d->lsize = desired_size;
 
 	/* Post conditions */
 	assert(d->data != NULL);
 	return 0;
 
-#ifndef MALLOC
 fail_close:
-	munmap(new_data, alloc_size);
+	munmap(new_data, desired_size);
 fail_mmap:
 	close(fd);
 fail_open:
 fail_extend_file:
 fail_stat:
-#else
-	free(new_data);
-fail_darray_extend:
-#endif
 	assert(rc < 0);
 	return rc;
 }
+#else
+static int darray_alloc_malloc(struct darray *d, size_t desired_size)
+{
+	/* Preconditions */
+	assert(d != NULL);
+	assert(desired_size > 0);
 
+	int rc = 0;
+	void *new_data = realloc(d->data, desired_size);
+	if (!new_data) {
+		rc = -1;
+		goto fail_realloc;
+	}
+	assert(new_data != NULL);
+
+	d->data = new_data;
+	d->lsize = desired_size;
+
+	/* Postconditions */
+	assert(d->data != NULL);
+	return 0;
+
+	free(new_data);
+fail_realloc:
+	assert(rc < 0);
+	return rc;
+}
+#endif
+
+/*
+ * Attempts to change the backend of the given darray (malloc() or mmap()) to
+ * the desired_size. If desired_size is set to zero, an attempt will be made
+ * to map the file as-is, which will fail in the usual cases or if the file
+ * is zero size (has not been created).
+*/
+static int darray_alloc(struct darray *d, size_t desired_size)
+{
+	/* Preconditions */
+	assert(d != NULL);
+	assert(d->path != NULL);
+
+	int rc = -1;
+#ifndef MALLOC
+	rc = darray_alloc_mmap(d, desired_size);
+#else
+	rc = darray_alloc_malloc(d, desired_size);
+#endif
+
+	/* Postconditions */
+	if (rc == 0) {
+		assert(d->data != NULL);
+	} else {
+		assert(d->data == NULL);
+	}
+	return rc;
+}
+
+/*
+ * Ensures that there is room for another element in the darray's backend, and
+ * atttemps to expand it otherwise.
+*/
 static int darray_ensure_size(struct darray *d)
 {
 	/* Preconditions */
@@ -205,16 +252,16 @@ static int darray_ensure_size(struct darray *d)
 		assert(d->data != NULL);
 		return 0;
 	}
-	/* Otherwise extend the size of the array to make room for the insert. */
 
+	/* Otherwise extend the size of the array to make room for the insert. */
 	const int expn_factor = 2; /* Replace as needed. */
-	const size_t new_size = d->dsize * expn_factor;
+	const size_t new_size = d->lsize * expn_factor;
 	const size_t new_cap = d->cap * expn_factor;
-	if ((new_size < d->dsize) || (new_cap < d->cap)) {
+	if ((new_size < d->lsize) || (new_cap < d->cap)) {
 		rc = 1;
-		goto fail_int_overflow;
+		goto fail_int_wrap;
 	}
-	assert(new_size > d->dsize);
+	assert(new_size > d->lsize);
 	assert(new_cap > d->cap);
 
 	if ((rc = darray_alloc(d, new_size))) {
@@ -226,12 +273,12 @@ static int darray_ensure_size(struct darray *d)
 
 	/* Post_conditions. */
 	assert(d->data != NULL);
-	assert(d->dsize > 0);
+	assert(d->lsize > 0);
 	assert(d->use < d->cap);
 	return 0;
 
 fail_darray_alloc:
-fail_int_overflow:
+fail_int_wrap:
 	assert(rc != 0);
 	return rc;
 }
@@ -262,6 +309,146 @@ uint64_deserialize(const unsigned char *str)
 }
 #endif
 
+/* Allocates memory for the path 'dir/name.ext' */
+static char *
+create_path(const char *dir, const char *name, const char *ext)
+{
+	assert(dir != NULL);
+	assert(name != NULL);
+	assert(ext != NULL);
+
+	size_t dir_len = strlen(dir);
+	size_t name_len = strlen(name);
+	size_t ext_len = strlen(ext);
+
+	/* Additional space for a slash, a period, and a null terminator. */
+	char *path = malloc(dir_len + name_len + ext_len + 3);
+	if (!path) {
+		return NULL;
+	}
+
+	assert(path != NULL);
+
+	/* Copy over appropriate fields, with unix path conventions. */
+	memcpy(path, dir, dir_len);
+	path[dir_len] = '/';
+	memcpy(path + dir_len + 1, name, name_len);
+	path[dir_len + name_len + 1] = '.';
+	memcpy(path + dir_len + name_len + 2, ext, ext_len + 1); /* null too */
+
+	/* Postconditions. */
+	assert(path[dir_len + name_len + ext_len + 2] == '\0');
+
+	return path;
+}
+
+#ifndef MALLOC
+static int
+darray_attempt_restore(struct darray *d,
+		enum VALUE_TYPE *val_type, size_t *val_size)
+{
+	/* Preconditions */
+	assert(d != NULL);
+	assert(val_type != NULL);
+	assert(val_size != NULL);
+
+	int rc = 0;
+
+	rc = darray_alloc(d, 0); /* Signal darray_alloc() to map the whole file. */
+
+	switch(rc) {
+	default: /* Error in darray_alloc */
+		goto fail_darray_alloc;
+	case 1: /* The file is empty. */
+		assert(d->data == NULL);
+		return 1; /* Not a failure case! */
+	
+	case 0:  /* The file has stuff. Check it out. */
+		break;
+	}
+
+	assert(d->data != NULL);
+
+	/* Attempt to deserialize the struct from the file. */
+	if (uint64_deserialize(d->data) != 0xDEADBEEFCAFED00D) {
+		/* Bad file identifier. */
+		rc = 2;
+		goto fail_file;
+	}	
+	
+	if (uint64_deserialize(d->data + sizeof(uint64_t)) > 0) {
+		/* We can't read files of this version. */
+		rc = 3;
+		goto fail_version;
+	}
+
+	/* Ensure that the type is as we expect. */
+	const uint64_t decoded_value_type =
+		uint64_deserialize(d->data + 2 * sizeof(uint64_t));
+	enum VALUE_TYPE persisted_vtype;
+	switch(decoded_value_type) {
+	case 0:
+		persisted_vtype = UNSIGNED_INT;
+		break;
+	case 1:
+		persisted_vtype = BITSET;
+		break;
+	default:
+		rc = 4;
+		goto fail_value_type;
+		break;
+	}
+
+	if (persisted_vtype != *val_type) {
+		*val_type = persisted_vtype;
+		rc = 5;
+		goto fail_value_type;
+	}
+
+	const uint64_t persisted_vsize =
+		uint64_deserialize(d->data + 3 * sizeof(uint64_t));
+
+	/* Value_size is arbitrary for bitsets. */
+	if ((persisted_vtype != BITSET) && (persisted_vsize != *val_size)){
+		*val_size = persisted_vsize;
+		rc = 6;
+		goto fail_value_size;
+	}
+
+	d->use = uint64_deserialize(d->data + 4 * sizeof(uint64_t));
+	d->cap = uint64_deserialize(d->data + 5 * sizeof(uint64_t));
+	if (d->cap < d->use) {
+		rc = 7;
+		goto fail_usecap;
+	}
+
+	/* Postconditions */
+	assert(d != NULL);
+	assert(d->cap >= d->use);
+	assert(d->data != NULL);
+	assert(d->path != NULL);
+	assert(d->lsize > 0);
+	if (persisted_vtype != BITSET) {
+		assert(d->lsize > d->cap);
+	}
+	return 0;
+
+fail_usecap:
+fail_value_type:
+fail_value_size:
+fail_file:
+fail_version:
+	munmap(d->data, d->lsize);
+	d->data = NULL;
+fail_darray_alloc:
+	/* Post conditions */
+	assert(d->data == NULL);
+	assert(d->path == NULL);
+	assert(rc != 0);
+	return rc;
+}
+#endif
+
 int darray_init(struct darray *d, const size_t val_cnt,
         enum VALUE_TYPE *val_type, size_t *val_size,
         const char *dir, const char *name, const char *ext)
@@ -276,108 +463,41 @@ int darray_init(struct darray *d, const size_t val_cnt,
 	assert(name != NULL);
 	assert(ext != NULL);
 
-	const size_t dir_len = strlen(dir);
-	const size_t name_len = strlen(name);
-	const size_t ext_len = strlen(ext);
-
 	int rc = 0;
 
-	d->path = malloc(dir_len + name_len + ext_len + 3); /* Null terminator */
+	d->data = NULL;
+	d->path = create_path(dir, name, ext);
 	if (!d->path) {
 		rc = 1;
 		goto fail_path_malloc;
 	}
-	assert(d->path != NULL); /* Psuedo precondition for below. */
 
-	/* Copy over appropriate fields, with unix path conventions. */
-	memcpy(d->path, dir, dir_len);
-	d->path[dir_len] = '/';
-	memcpy(d->path + dir_len + 1, name, name_len);
-	d->path[dir_len + name_len + 1] = '.';
-	memcpy(d->path + dir_len + name_len + 2, ext, ext_len + 1);/* null too */
+	assert(d->path != NULL);
 
-	/* Psuedo postcondition for above. */
-	assert(d->path[dir_len + name_len + ext_len + 2] == '\0');
-
+#ifndef MALLOC
 	/* Initialize the rest of the darray struct, using the persistent version
 	 * stored on the file if needed.
 	*/
-#ifndef MALLOC
-	assert(d->path != NULL);
-	rc = darray_alloc(d, 0); /* Signal darray_alloc() to map the entire file. */
+	rc = darray_attempt_restore(d, val_type, val_size);
+#else 
+	/* Hacky abuse of the above function's return codes to merge code paths. */
+	rc = 1; 
+#endif 
+
 	switch(rc) {
-	default: /* Error in darray_alloc */
-		d->data = NULL;
-		goto fail_darray_alloc;
+	case 0:
 		break;
-	case 1: { /* The file is empty. */
+	default:
+		goto fail_darray_attempt_restore;
+	case 1:
 		d->use = 0;
 		d->cap = (val_cnt == 0) ? 5 : val_cnt;
-		d->dsize = 0;
-    	d->data = NULL;
-    	d->push = NULL;
-    	d->get = NULL;
+		d->lsize = 0;
+		d->data = NULL;
+		d->push = NULL;
+		d->get = NULL;
 		break;
 	}
-	case 0: /* fallthru TODO: Edit darray_alloc() to differentiate
-			   these cases */
-	case 2: { /* The file has stuff. Check it out. */
-		if ((uint64_deserialize(d->data) != 0xDEADBEEFCAFED00D)) {
-			if (uint64_deserialize(d->data + sizeof(uint64_t)) > 0) {
-				/* We can't read files of this version. */
-				rc = 2;
-				goto fail_version;
-			} else {
-				/* Bad file identifier. */
-				rc = 3;
-				goto fail_file;
-			}
-		}	
-		/* Now we have to deseriailze the type and val_size, confirm that
-		 * they're the same as the user requested, set up the remaining fields,
-		 * and continue execution.
-		*/
-		const uint64_t encoded_value_type =
-			uint64_deserialize(d->data + 2 * sizeof(uint64_t));
-		const uint64_t persistent_value_size =
-			uint64_deserialize(d->data + 3 * sizeof(uint64_t));
-		enum VALUE_TYPE de_serial_type;
-		switch(encoded_value_type) {
-		case 0:
-			de_serial_type = UNSIGNED_INT;
-			break;
-		case 1:
-			de_serial_type = BITSET;
-			break;
-		default:
-			rc = 4;
-			goto fail_value_type;
-			break;
-		}
-		if (de_serial_type != *val_type) {
-			*val_type = de_serial_type;
-			rc = 5;
-			goto fail_value_type;
-		}
-		if ((de_serial_type != BITSET)&&(persistent_value_size != *val_size)){
-			*val_size = persistent_value_size;
-			rc = 6;
-			goto fail_value_size;
-		}
-		d->use = uint64_deserialize(d->data + 4 * sizeof(uint64_t));
-		d->cap = uint64_deserialize(d->data + 5 * sizeof(uint64_t));
-		assert(d->cap >= d->use); /* TODO: change to proper error handling */
-		break;
-	}
-	}
-#else
-	d->use = 0;
-	d->cap = (val_cnt == 0) ? 5 : val_cnt;
-	d->dsize = 0;
-	d->data = NULL;
-	d->push = NULL;
-	d->get = NULL;
-#endif
 
 	/* Lame polymorphism */
 	size_t alloc_size = 0;
@@ -407,7 +527,7 @@ int darray_init(struct darray *d, const size_t val_cnt,
 		alloc_size = d->cap * *val_size;
 		if (alloc_size <= d->cap) {
 			rc = 7;
-			goto fail_dsize_overflow;
+			goto fail_lsize_wrap;
 		}
 		assert(alloc_size > d->cap);
 		break;
@@ -420,7 +540,7 @@ int darray_init(struct darray *d, const size_t val_cnt,
 	 	* operate at its native word size for maximum efficiency. (Bitsets are
 	 	* endian independent, so the only portability issue is word size).
 		* (Otherwise, we might run into issues with an array allocated on an
-		* arch with a small wordsize (e.g. 16 bits) on an arch with a bigger
+		* arch with a small worlsize (e.g. 16 bits) on an arch with a bigger
 		* word size (e.g. 32 or 64 bit).
 		*
 		* This function below gives us the rounded up count of uint64's needed
@@ -441,13 +561,12 @@ int darray_init(struct darray *d, const size_t val_cnt,
 	}
 	alloc_size += HEADER_LENGTH;
 
-	if (!d->data) { /* Our attempt to deserialize it from the file failed. */
-		if ((rc = darray_alloc(d, alloc_size))) {
-			goto fail_darray_alloc;
-		}
+	if ((!d->data) && (rc = darray_alloc(d, alloc_size))) {
+		/* Initialization failed. Short circuiting ensures no double-alloc. */
+		goto fail_darray_alloc;
 	}
 	assert(d->data != NULL);
-	d->dsize = alloc_size;
+	d->lsize = alloc_size;
 
 	/* Post-conditions */
 	assert(d->cap != 0);
@@ -459,20 +578,16 @@ int darray_init(struct darray *d, const size_t val_cnt,
 	assert(d->get != NULL);
 	return 0;
 
-fail_value_type:
-fail_value_size:
 fail_alloc_size_wrap:
 #ifndef MALLOC
-fail_file:
-fail_version:
-	munmap(d->data, d->dsize);
-	d->data = NULL;
+	munmap(d->data, d->lsize);
 #else
 	free(d->data);
-	d->data = NULL;
 #endif
+	d->data = NULL;
 fail_darray_alloc:
-fail_dsize_overflow:
+fail_darray_attempt_restore:
+fail_lsize_wrap:
 	free(d->path);
 	d->path = NULL;
 fail_path_malloc:
@@ -489,7 +604,7 @@ void darray_free(struct darray *d)
 {
 	/* Preconditions */
 	assert(d->use <= d->cap);
-	assert(d->dsize >= d->cap);
+	assert(d->lsize >= d->cap);
 
 	free(d->path);
 #ifndef MALLOC
@@ -506,12 +621,12 @@ void darray_free(struct darray *d)
 	temp = d->cap;
 	uint64_serialize(temp, d->data + 5 * sizeof(uint64_t));
 
-	msync(d->data, d->dsize, MS_SYNC);
-	munmap(d->data, d->dsize);
+	msync(d->data, d->lsize, MS_SYNC);
+	munmap(d->data, d->lsize);
 #else
 	free(d->data);
 #endif
-	d->use = d->cap = d->dsize = 0;
+	d->use = d->cap = d->lsize = 0;
 	d->data = NULL;
 	d->path = NULL;
 
@@ -520,7 +635,7 @@ void darray_free(struct darray *d)
 	assert(d->data == NULL);
 	assert(d->use == 0);
 	assert(d->cap == 0);
-	assert(d->dsize == 0);
+	assert(d->lsize == 0);
 	assert(d->use <= d->cap);
 }
 
@@ -528,7 +643,7 @@ static int darray_uint8_push(struct darray *d, const void *v)
 {
 	/* Preconditions */
 	assert(d->use <= d->cap);
-	assert(d->dsize >= d->cap);
+	assert(d->lsize >= d->cap);
 
 	int rc = 0;
 	if ((rc = darray_ensure_size(d))) {
@@ -555,7 +670,7 @@ static void darray_uint8_get(const struct darray *d, const size_t ind, void *v)
 	/* Preconditions */
 	assert(d->use <= d->cap);
 	assert(ind <= d->use);
-	assert(d->dsize >= d->cap);
+	assert(d->lsize >= d->cap);
 
 	const size_t rind = ind * sizeof(uint8_t);
 	assert(rind >= ind - 1);
@@ -571,7 +686,7 @@ static int darray_uint16_push(struct darray *d, const void *v)
 {
 	/* Preconditions */
 	assert(d->use <= d->cap);
-	assert(d->dsize >= d->cap);
+	assert(d->lsize >= d->cap);
 
 	int rc = 0;
 	if ((rc = darray_ensure_size(d))) {
@@ -599,7 +714,7 @@ static void darray_uint16_get(const struct darray *d, const size_t ind, void *v)
 	/* Preconditions */
 	assert(d->use <= d->cap);
 	assert(ind <= d->use);
-	assert(d->dsize >= d->cap);
+	assert(d->lsize >= d->cap);
 
 	const size_t rind = ind * sizeof(uint16_t);
 #if NOSERIAL
@@ -616,7 +731,7 @@ static int darray_uint32_push(struct darray *d, const void *v)
 {
 	/* Preconditions */
 	assert(d->use <= d->cap);
-	assert(d->dsize >= d->cap);
+	assert(d->lsize >= d->cap);
 
 	int rc = 0;
 	if ((rc = darray_ensure_size(d))) {
@@ -646,7 +761,7 @@ static void darray_uint32_get(const struct darray *d, const size_t ind, void *v)
 	/* Preconditions */
 	assert(d->use <= d->cap);
 	assert(ind <= d->use);
-	assert(d->dsize >= d->cap);
+	assert(d->lsize >= d->cap);
 
 	const size_t rind = ind * sizeof(uint32_t);
 #if NOSERIAL
@@ -665,7 +780,7 @@ static int darray_uint64_push(struct darray *d, const void *v)
 {
 	/* Preconditions */
 	assert(d->use <= d->cap);
-	assert(d->dsize >= d->cap);
+	assert(d->lsize >= d->cap);
 
 	int rc = 0;
 	if ((rc = darray_ensure_size(d))) {
@@ -699,7 +814,7 @@ static void darray_uint64_get(const struct darray *d, const size_t ind, void *v)
 	/* Preconditions */
 	assert(d->use <= d->cap);
 	assert(ind <= d->use);
-	assert(d->dsize >= d->cap);
+	assert(d->lsize >= d->cap);
 
 	const size_t rind = ind * sizeof(uint64_t);
 #if NOSERIAL
@@ -787,7 +902,8 @@ static void darray_bset_print_all(struct darray *d)
 
 	unsigned int val = 0;
 	printf("Darray %s:\n", d->path);
-	for (size_t i = 0; i < d->use; ++i) {
+	for (size_t i = 0; i < 10000000; ++i) {
+	//for (size_t i = 0; i < d->use; ++i) { TEST
 		d->get(d, i, &val);
 		if (val) {
 			printf("%4zu ", i);
@@ -817,14 +933,12 @@ int main(void)
 		goto fail_darray_init;
 	}
 
-#if 0
 	for (uint64_t i = 0; i < 10000000; ++i) {
 		if ((rc = d.push(&d, &i))) {
 			printf("Error, malloc.\n");
 			goto fail_darray_append;
 		}
 	}
-#endif
 
 	switch (t) {
 	case UNSIGNED_INT:
