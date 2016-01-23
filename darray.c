@@ -13,6 +13,7 @@ struct darray;
 typedef int (*push_func)(struct darray *, const void *);
 typedef void (*get_func)(const struct darray *, const size_t, void *);
 
+enum TYPE {UNSIGNED_INT, BITSET};
 /*
  * Note: There is doubtlessly some expense to the serialization and
  * deserialization every access. in my testing, I've only managed to see a
@@ -27,9 +28,6 @@ typedef void (*get_func)(const struct darray *, const size_t, void *);
  * 	Specifically in darray_*_push(), darray_*_get(), as well as the switch() in
  * 	darray_init().
  * 	Also find a way to pretty-up the SERIAL vs NOSERIAL code. #define is ugly.
- *
- * TODO: Add a setting to set the darray to store a bitarray. (An enum was used
- * last time. Also figure out a good way to set this setting).
  *
  * TODO: Implement persistance.
  *
@@ -187,13 +185,13 @@ static int darray_ensure_size(struct darray *d)
 	}
 
 	assert(d->data != NULL);
-	d->cap = d->cap * 2;
+	d->cap = d->cap * 2; /* Safe since d->size * 2 worked */
 	d->dsize = asize;
 
 	/* Post_conditions. */
 	assert(d->data != NULL);
+	assert(d->dsize > 0);
 	assert(d->use < d->cap);
-	assert((d->dsize >= d->cap) && (d->dsize % d->cap == 0));
 	return 0;
 
 fail_darray_alloc_array:
@@ -202,6 +200,10 @@ fail_int_overflow:
 	return rc;
 }
 
+/* Note: I'm not sure if I need to check these functions for wrap on size_t,
+ * since there is multiplication with d->use, but I think they're protected by
+ * constraints with d->dsize. As of now it's protected by an assert().
+*/
 static int darray_uint8_push(struct darray *d, const void *v)
 {
 	/* Preconditions */
@@ -215,6 +217,7 @@ static int darray_uint8_push(struct darray *d, const void *v)
 	assert(d->use < d->cap);
 
 	const size_t rind = d->use++ * sizeof(uint8_t);
+	assert(rind >= d->use - 1);
 #if NOSERIAL
 	memcpy(&d->data[rind], v, sizeof(uint8_t));
 #else
@@ -235,6 +238,7 @@ static void darray_uint8_get(const struct darray *d, const size_t ind, void *v)
 	assert(d->dsize >= d->cap);
 
 	const size_t rind = ind * sizeof(uint8_t);
+	assert(rind >= ind - 1);
 #if NOSERIAL
 	memcpy(v, &d->data[rind], sizeof(uint8_t));
 #else
@@ -256,6 +260,7 @@ static int darray_uint16_push(struct darray *d, const void *v)
 	assert(d->use < d->cap);
 
 	const size_t rind = d->use++ * sizeof(uint16_t);
+	assert(rind >= d->use - 1);
 #if NOSERIAL
 	memcpy(&d->data[rind], v, sizeof(uint16_t));
 #else
@@ -299,6 +304,7 @@ static int darray_uint32_push(struct darray *d, const void *v)
 	assert(d->use < d->cap);
 
 	const size_t rind = d->use++ * sizeof(uint32_t);
+	assert(rind >= d->use - 1);
 #if NOSERIAL
 	memcpy(&d->data[rind], v, sizeof(uint32_t));
 #else
@@ -345,6 +351,7 @@ static int darray_uint64_push(struct darray *d, const void *v)
 	assert(d->use < d->cap);
 
 	const size_t rind = d->use++ * sizeof(uint64_t);
+	assert(rind >= d->use - 1);
 #if NOSERIAL
 	memcpy(&d->data[rind], v, sizeof(uint64_t));
 #else
@@ -388,23 +395,22 @@ static int darray_bset_push(struct darray *d, const void *v)
 {
 	/* Preconditions */
 	assert(d->use <= d->cap);
-	assert(d->dsize >= d->cap);
 
 	int rc = 0;
-	/* Note, we reserve space for the largest possible integer (uint64_t) so
-	 * that no matter what architecture we're working on, it will be able to
-	 * operate at its native word size for maximum efficiency. (Bitsets are
-	 * endian independent, so the only portability issue is wordsize).
-	*/
 	if ((rc = darray_ensure_size(d))) {
 		goto fail_darray_ensure_size;
 	}
 	assert(d->use < d->cap);
 
-	const size_t rind = d->use / sizeof(unsigned int);
-	const size_t roff = d->use++ % sizeof(unsigned int);
+	const size_t rind = d->use / (sizeof(unsigned int));
+	const size_t roff = d->use++ % (sizeof(unsigned int));
 
-	d->data[rind] |= *((const unsigned int *) v) == 0 ? 0 : 1 << roff;
+	if ((*(const unsigned int *)v)) {
+		d->data[rind] |= (1 << roff);
+	} else {
+		d->data[rind] &= ~(1 << roff);
+	}
+
 	return 0;
 
 fail_darray_ensure_size:
@@ -417,35 +423,33 @@ static void darray_bset_get(const struct darray *d, const size_t ind, void *v)
 	/* Preconditions */
 	assert(d->use <= d->cap);
 	assert(ind <= d->use);
-	assert(d->dsize >= d->cap);
 
-	const size_t rind = ind / sizeof(unsigned int);
-	const size_t roff = ind % sizeof(unsigned int);
+	const size_t rind = ind / (sizeof(unsigned int));
+	const size_t roff = ind % (sizeof(unsigned int));
 
 	*((unsigned int *) v) = d->data[rind] & (1 << roff);
 	return;
 }
 
-int darray_init(struct darray *d, const size_t init_size, const size_t val_size,
+int darray_init(struct darray *d, const enum TYPE val_type,
+		const size_t init_size, const size_t val_size,
 		const char *dir, const char *name, const char *ext)
 {
 	/* Preconditions */
 	assert(d != NULL);
+	assert(init_size >= 0);
 	assert(val_size > 0);
 	assert(dir != NULL);
 	assert(name != NULL);
 	assert(ext != NULL);
 
-	const size_t dir_len = strlen(dir); /* More preconditions */
+	const size_t dir_len = strlen(dir);
 	const size_t name_len = strlen(name);
 	const size_t ext_len = strlen(ext);
-	assert(name[name_len] == '\0');
-	assert(dir[dir_len] == '\0');
-	assert(ext[ext_len] == '\0');
 
 	int rc = 0;
 	d->use = 0;
-    d->cap = init_size == 0 ? 5 : init_size;
+	d->cap = (init_size == 0) ? 5 : init_size;
 	d->dsize = 0;
     d->data = NULL;
     d->path = NULL;
@@ -470,12 +474,54 @@ int darray_init(struct darray *d, const size_t init_size, const size_t val_size,
 	/* Psuedo postcondition for above. */
 	assert(d->path[dir_len + name_len + ext_len + 2] == '\0');
 
-	const size_t alloc_size = d->cap * val_size;
-	if (alloc_size <= d->cap) {
-		rc = 2;
-		goto fail_dsize_overflow;
+	/* Lame polymorphism */
+	size_t alloc_size = 0;
+	switch(val_type) {
+	case UNSIGNED_INT: {
+		switch(val_size) {
+		case sizeof(uint8_t):
+			d->push = darray_uint8_push;
+			d->get = darray_uint8_get;
+			break;
+		case sizeof(uint16_t):
+			d->push = darray_uint16_push;
+			d->get = darray_uint16_get;
+			break;
+		case sizeof(uint32_t):
+			d->push = darray_uint32_push;
+			d->get = darray_uint32_get;
+			break;
+		case sizeof(uint64_t):
+			d->push = darray_uint64_push;
+			d->get = darray_uint64_get;
+			break;
+		default:
+			break;
+		}
+
+		alloc_size = d->cap * val_size;
+		if (alloc_size <= d->cap) {
+			rc = 2;
+			goto fail_dsize_overflow;
+		}
+		assert(alloc_size > d->cap);
+		break;
 	}
-	assert(alloc_size > d->cap);
+	case BITSET: {
+		d->push = darray_bset_push;
+		d->get = darray_bset_get;
+		/* Note, we reserve space for the largest possible integer (uint64_t) so
+	 	* that no matter what architecture we're working on, it will be able to
+	 	* operate at its native word size for maximum efficiency. (Bitsets are
+	 	* endian independent, so the only portability issue is word size).
+		*/
+		alloc_size =(sizeof(uint64_t)-1 + d->cap/sizeof(uint64_t));
+		break;
+	}
+	}
+	assert(d->push != NULL);
+	assert(d->get != NULL);
+	assert(alloc_size > 0);
 
 	if ((rc = darray_alloc_array(d, alloc_size))) {
 		rc += 2; /* Don't duplicate previous error codes. */
@@ -484,37 +530,9 @@ int darray_init(struct darray *d, const size_t init_size, const size_t val_size,
 	assert(d->data != NULL);
 	d->dsize = alloc_size;
 
-	switch(val_size) {
-	case sizeof(uint8_t):
-		d->push = darray_uint8_push;
-		d->get = darray_uint8_get;
-		break;
-	case sizeof(uint16_t):
-		d->push = darray_uint16_push;
-		d->get = darray_uint16_get;
-		break;
-	case sizeof(uint32_t):
-		d->push = darray_uint32_push;
-		d->get = darray_uint32_get;
-		break;
-	case sizeof(uint64_t):
-		d->push = darray_uint64_push;
-		d->get = darray_uint64_get;
-		break;
-	/* changeme */
-	case 12:
-		d->push = darray_bset_push;
-		d->get = darray_bset_get;
-		break;
-	default:
-		break;
-	}
-
 	/* Post-conditions */
 	assert(d->cap != 0);
 	assert(d->use <= d->cap);
-	assert(d->dsize >= d->cap);
-   	assert(d->dsize % d->cap == 0);
 	assert(rc == 0);
 	assert(d->data != NULL);
 	assert(d->path != NULL);
@@ -530,11 +548,11 @@ fail_path_malloc:
 	return rc;
 }
 
-void darray_free(struct darray *d, size_t val_size)
+void darray_free(struct darray *d)
 {
 	/* Preconditions */
 	assert(d->use <= d->cap);
-	assert(val_size > 0);
+	assert(d->dsize >= d->cap);
 
 	free(d->path);
 #ifdef MALLOC
@@ -543,7 +561,7 @@ void darray_free(struct darray *d, size_t val_size)
 	msync(d->data, d->dsize, MS_SYNC);
 	munmap(d->data, d->dsize);
 #endif
-	d->use = d->cap = 0;
+	d->use = d->cap = d->dsize = 0;
 	d->data = NULL;
 	d->path = NULL;
 
@@ -552,11 +570,12 @@ void darray_free(struct darray *d, size_t val_size)
 	assert(d->data == NULL);
 	assert(d->use == 0);
 	assert(d->cap == 0);
+	assert(d->dsize == 0);
 	assert(d->use <= d->cap);
 }
 
 #include <stdio.h>
-void darray_print_all(struct darray *d)
+void darray_uint_print_all(struct darray *d)
 {
 	assert(d->path != NULL);
 	assert(d->data != NULL);
@@ -601,23 +620,34 @@ int main(void)
 {
 	int rc = 0;
 	struct darray d;
-	if ((rc = darray_init(&d, 0, sizeof(unsigned int),
+
+	//const enum TYPE t = UNSIGNED_INT;
+	const enum TYPE t = BITSET;
+
+	if ((rc = darray_init(&d, t, 0, sizeof(unsigned int),
 			"/Users/nick/scratch/mmap_dynamic_array", "test", "eves"))) {
 		printf("Error. %d\n", rc);
 		goto fail_darray_init;
 	}
 
-	for (uint32_t i = 0; i < 10000000; ++i) {
+	for (unsigned int i = 0; i < 10000000; ++i) {
 		if ((rc = d.push(&d, &i))) {
 			printf("Error, malloc.\n");
 			goto fail_darray_append;
 		}
 	}
 
-	darray_print_all(&d);
+	switch (t) {
+	case UNSIGNED_INT:
+		darray_uint_print_all(&d);
+		break;
+	case BITSET:
+		darray_bset_print_all(&d);
+		break;
+	}
 
 fail_darray_append:
-	darray_free(&d, sizeof(uint32_t));
+	darray_free(&d);
 fail_darray_init:
 	return rc;
 }
