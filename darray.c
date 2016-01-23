@@ -157,6 +157,10 @@ darray_alloc_mmap(struct darray *d, size_t desired_size)
 		goto fail_mmap;
 	}
 
+	/* Again, it seems like all the errors are usage or signal interruption.
+	 * Maybe I should try closing() in a loop to avoid a signal killing the
+	 * close? TODO.
+	*/
 	if (close(fd) == -1) {
 		rc = D_CLOSE;
 		goto fail_close;
@@ -174,9 +178,9 @@ darray_alloc_mmap(struct darray *d, size_t desired_size)
 	return SUCCESS;
 
 fail_close:
-	munmap(new_data, desired_size);
+	assert(munmap(new_data, desired_size) == 0) /* All errors usage. */
 fail_mmap:
-	close(fd);
+	close(fd); 
 fail_open:
 fail_extend_file:
 fail_stat:
@@ -713,8 +717,17 @@ darray_free(struct darray *d)
 	}
 	if (d->data) {
 #ifndef MALLOC
-		msync(d->data, d->lsize, MS_SYNC);
-		munmap(d->data, d->lsize);
+		if (msync(d->data, d->lsize, MS_SYNC)) {
+			switch(errno) {
+			/* I have TODO more research into EIO, which is the only non-usage
+			 * error I see in my documentation, but otherwise I don't think we
+			 * can do much.
+			*/
+			default:
+				break;
+			}
+		}
+		assert (munmap(d->data, d->lsize) == 0); /* All errors are usage. */
 #else
 		free(d->data);
 #endif
