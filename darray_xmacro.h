@@ -21,6 +21,7 @@
     select(D_MISMATCH_TYPE, "The file's TYPE conflicts with that given.")\
     select(D_MISMATCH_VALUE_SIZE, \
             "The file's val_size conflicts with that given.")\
+    select(D_BADVAL, "A bad parameter was provided.")
 
 // Generate the enum.
 #undef select
