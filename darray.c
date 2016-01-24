@@ -1,4 +1,5 @@
 #include "darray.h"
+#include <stdio.h> /* DEBUG: */
 
 /*
  * Note: There is doubtlessly some expense to the serialization and
@@ -19,7 +20,9 @@
  *
  * TODO: Double check with someone else that bitarray is being used properly
  *
- * TODO: Finalize error handling.
+ * TODO: There is something really, really wrong with the init and alloc code.
+ * bit arrays never extend, and unsigned ints blow up. check the darray_init()
+ * section where we select the type and try to fix it, yeah?
 */
 
 #define HEADER_IDENTIFIER 0xDEADBEEFCAFED00D
@@ -71,35 +74,39 @@ stretch_size(const char *path, int *fd, const size_t new_size)
 	assert(fd != NULL);
 	assert(new_size > 0);
 
-	enum DARRAY_ERROR rc;
-	*fd = open(path, O_RDWR|O_CREAT|O_NOFOLLOW);
-	if (*fd < 0) {
+	enum DARRAY_ERROR rc = SUCCESS;
+	const int fd_local = open(path, O_RDWR|O_CREAT|O_NOFOLLOW);
+	if (fd_local < 0) {
 		rc = D_OPEN;
 		goto fail_open;
 	}
 
-	if (lseek(*fd, new_size, SEEK_SET) == -1) {
+	if (lseek(fd_local, new_size, SEEK_SET) == -1) {
 		rc = D_LSEEK;
 		goto fail_lseek;
 	}
 
-	if (write(*fd, "", 1) == -1) {
+	if (write(fd_local, "", 1) == -1) {
 		rc = D_WRITE;
 		goto fail_write;
 	}
 
+	*fd = fd_local;
 	/* Postconditions */
 	assert(fd != NULL);
 	assert(*fd > 0);
+	assert(rc == SUCCESS);
 	return SUCCESS;
 
 fail_write:
 fail_lseek:
-	close(*fd);
+	close(fd_local);
 fail_open:
+	fd_local = -1;
 	*fd = -1;
 	assert(fd != NULL);
 	assert(*fd == -1);
+	assert(fd_local == -1);
 	assert(rc != SUCCESS);
 	return rc;
 }
@@ -193,6 +200,7 @@ darray_alloc_mmap(struct darray *d, size_t new_size)
 	assert(d->data != NULL);
 	assert(fd == -1);
 	assert(d->lsize >= new_size);
+	assert(rc == SUCCESS);
 	return SUCCESS;
 
 fail_close:
@@ -272,63 +280,7 @@ darray_alloc(struct darray *d, size_t new_size)
 	/* Postconditions */
 	if (rc == SUCCESS) {
 		assert(d->data != NULL);
-	} else {
-		assert(d->data == NULL);
 	}
-	return rc;
-}
-
-/*
- * This function ensures that there is room for another element in the given
- * darray's backend, and atttemps to expand it otherwise.
- *
- * Returns SUCCESS on success.
-*/
-static enum DARRAY_ERROR
-darray_ensure_size(struct darray *d)
-{
-	/* Preconditions */
-	assert(d != NULL);
-	assert(d->use <= d->cap);
-	assert(d->data != NULL);
-
-	enum DARRAY_ERROR rc;
-	if (d->use < d->cap) { /* Early exit, since we have no work to do. */
-		/* Postconditions */
-		assert(d != NULL);
-		assert(d->use <= d->cap);
-		assert(d->data != NULL);
-		return SUCCESS;
-	}
-
-	/*Otherwise extend the size of the array to make room for the insert.*/
-	const int expn_factor = 2; /* Replace as needed. */
-	const size_t new_size = d->lsize * expn_factor;
-	const size_t new_cap = d->cap * expn_factor;
-	if ((new_size < d->lsize) || (new_cap < d->cap)) {
-		rc = D_WRAP;
-		goto fail_uint_wrap;
-	}
-	assert(new_size > d->lsize);
-	assert(new_cap > d->cap);
-
-	if ((rc = darray_alloc(d, new_size))) {
-		goto fail_darray_alloc;
-	}
-	assert(d->data != NULL);
-
-	d->cap = new_cap;
-
-	/* Post_conditions. */
-	assert(d != NULL);
-	assert(d->data != NULL);
-	assert(d->lsize > 0);
-	assert(d->use <= d->cap);
-	return 0;
-
-fail_darray_alloc:
-fail_uint_wrap:
-	assert(rc != SUCCESS);
 	return rc;
 }
 
@@ -458,24 +410,45 @@ darray_header_serialize(struct darray *d, const enum VALUE_TYPE valtyp,
 	assert(d->use <= d->cap);
 	assert(value_size > 0);
 
-	/* TODO: Is it better stylistically to get rid of temp? */
 	/* Header format is IDENTIFIER | VERSION | TYPE | SIZE | USE | CAP */
-	uint64_t temp = HEADER_IDENTIFIER;
-	size_t offset = 0;
-	offset += uint64_serialize(temp, d->data + offset * sizeof(uint64_t));
-	temp = HEADER_VERSION;
-	offset += uint64_serialize(temp, d->data + offset * sizeof(uint64_t));
-	temp = 0;
-	offset += value_type_serialize(valtyp,
-	    d->data + offset * sizeof(uint64_t));
-	temp = value_size;
-	offset += uint64_serialize(temp, d->data + offset * sizeof(uint64_t));
-	temp = d->use;
-	offset += uint64_serialize(temp, d->data + offset * sizeof(uint64_t));
-	temp = d->cap;
-	offset += uint64_serialize(temp, d->data + offset * sizeof(uint64_t));
+	uint64_serialize((uint64_t)HEADER_IDENTIFIER,
+	    d->data + 0 * sizeof(uint64_t));
+	uint64_serialize((uint64_t)HEADER_VERSION,
+	    d->data + 1 * sizeof(uint64_t));
+	value_type_serialize(valtyp,
+	    d->data + 2 * sizeof(uint64_t));
+	uint64_serialize((uint64_t)value_size,
+	    d->data + 3 * sizeof(uint64_t));
+	uint64_serialize((uint64_t)d->use,
+	    d->data + 4 * sizeof(uint64_t));
+	uint64_serialize((uint64_t)d->cap,
+	    d->data + 5 * sizeof(uint64_t));
 
 	return;
+}
+
+static void
+darray_header_update(struct darray *d)
+{
+	/* Preconditions. */
+	assert(d != NULL);
+	assert(d->data != NULL);
+	assert(d->use <= d->cap);
+
+	printf("DEBUG d->use: %llu\nDEBUG d->cap: %llu\n", d->use, d->cap);
+	/* Header format is IDENTIFIER | VERSION | TYPE | SIZE | USE | CAP */
+	/* As long as use and cap are the last two elements, this will work. */
+#if 0
+	uint64_serialize((uint64_t)d->use,
+	    d->data + HEADER_LENGTH - 2 * sizeof(uint64_t));
+	uint64_serialize((uint64_t)d->cap,
+	    d->data + HEADER_LENGTH - 1 * sizeof(uint64_t));
+#endif
+	uint64_serialize((uint64_t)d->use,
+	    d->data + 4 * sizeof(uint64_t));
+	uint64_serialize((uint64_t)d->cap,
+	    d->data + 5 * sizeof(uint64_t));
+
 }
 
 /*
@@ -497,41 +470,49 @@ darray_header_deserialize(struct darray *d, enum VALUE_TYPE *val_type,
 	assert(d->data != NULL);
 	assert(val_type != NULL);
 	assert(val_size != NULL);
+	assert(*val_size > 0);
 
 	enum DARRAY_ERROR rc = SUCCESS;
 
 	/* Attempt to deserialize the struct from the file. */
-	if (uint64_deserialize(d->data) != (uint64_t)HEADER_IDENTIFIER) {
+	if (uint64_deserialize(d->data + 0 * sizeof(uint64_t))
+	    != (uint64_t)HEADER_IDENTIFIER) {
 		/* Bad file identifier. */
 		rc = D_BAD_IDENTIFIER;
 		goto fail_file;
 	}
 
-	if (uint64_deserialize(d->data + sizeof(uint64_t)) > HEADER_VERSION) {
+	if (uint64_deserialize(d->data + 1 * sizeof(uint64_t))
+	    > HEADER_VERSION) {
 		/* We can't read files of this version. */
 		rc = D_BAD_VERSION;
 		goto fail_version;
 	}
 
 	/* Ensure that the type is as we expect. */
-	if ((rc = value_type_deserialize(d->data + 2 * sizeof(uint64_t), val_type))
-			!= SUCCESS) {
+	if ((rc = value_type_deserialize(d->data + 2 * sizeof(uint64_t),
+	    val_type)) != SUCCESS) {
 		goto fail_value_type_deserialize;
 	}
 
 
 	const uint64_t persisted_vsize =
 		uint64_deserialize(d->data + 3 * sizeof(uint64_t));
+	printf("DEBUG deserialize: %llu\n", persisted_vsize);
 
 	/* Value_size is arbitrary for bitsets. */
 	if ((*val_type != BITSET) && (persisted_vsize != *val_size)){
 		rc = D_MISMATCH_VALUE_SIZE;
+		printf("DEBUG 1: %zu\n", *val_size);
 		*val_size = persisted_vsize;
+		printf("DEBUG 2: %zu\n", *val_size);
 		goto fail_mismatch_size;
 	}
 
 	d->use = uint64_deserialize(d->data + 4 * sizeof(uint64_t));
 	d->cap = uint64_deserialize(d->data + 5 * sizeof(uint64_t));
+	printf("DEBUG deserialize d->use: %llu\n", d->use);
+	printf("DEBUG deserialize d->cap: %llu\n", d->cap);
 	if (d->cap < d->use) {
 		rc = D_BAD_USECAP;
 		goto fail_usecap;
@@ -614,6 +595,64 @@ fail_darray_alloc_persistance:
 	return rc;
 }
 #endif
+
+/*
+ * This function ensures that there is room for another element in the given
+ * darray's backend, and atttemps to expand it otherwise.
+ *
+ * Returns SUCCESS on success.
+*/
+static enum DARRAY_ERROR
+darray_ensure_size(struct darray *d)
+{
+	/* Preconditions */
+	assert(d != NULL);
+	assert(d->use <= d->cap);
+	assert(d->data != NULL);
+
+	const size_t dbg_size = d->lsize;
+
+	enum DARRAY_ERROR rc;
+	if (d->use < d->cap) { /* Early exit, since we have no work to do. */
+		/* Postconditions */
+		assert(d != NULL);
+		assert(d->use < d->cap);
+		assert(d->data != NULL);
+		return SUCCESS;
+	}
+
+	/*Otherwise extend the size of the array to make room for the insert.*/
+	const int expn_factor = 2; /* Replace as needed. */
+	const size_t new_size = d->lsize * expn_factor;
+	const size_t new_cap = d->cap * expn_factor;
+	if ((new_size < d->lsize) || (new_cap < d->cap)) {
+		rc = D_WRAP;
+		goto fail_uint_wrap;
+	}
+	assert(new_size > d->lsize);
+	assert(new_cap > d->cap);
+
+	printf("DEBUG lsize: %zu | d->cap %llu\n", d->lsize, d->cap);
+	if ((rc = darray_alloc(d, new_size))) {
+		goto fail_darray_alloc;
+	}
+	printf("DEBUG lsize: %zu | d->cap %llu\n", d->lsize, d->cap);
+	assert(d->data != NULL);
+
+	d->cap = new_cap;
+
+	/* Post_conditions. */
+	assert(d != NULL);
+	assert(d->data != NULL);
+	assert(d->lsize > dbg_size);
+	assert(d->use <= d->cap);
+	return 0;
+
+fail_darray_alloc:
+fail_uint_wrap:
+	assert(rc != SUCCESS);
+	return rc;
+}
 
 /* This function allocates memory for the path 'dir/name.ext'
  *
@@ -841,6 +880,7 @@ darray_free(struct darray *d)
 	}
 	if (d->data) {
 #ifndef MALLOC
+		darray_header_update(d);
 		if (msync(d->data, d->lsize, MS_SYNC)) {
 			switch(errno) {
 			/* I have TODO more research into EIO, which is the
@@ -928,7 +968,7 @@ darray_uint8_get(const struct darray *d, const size_t ind, void *v)
 	assert(d != NULL);
 	assert(d->data != NULL);
 	assert(v != NULL);
-	assert(ind > 0);
+	assert(ind >= 0);
 
 	assert(d->use <= d->cap);
 	assert(ind <= d->use);
@@ -936,7 +976,7 @@ darray_uint8_get(const struct darray *d, const size_t ind, void *v)
 
 	const size_t rind = ind * sizeof(uint8_t);
 	const unsigned char *rdata = d->data + HEADER_LENGTH;
-	assert(rind >= ind - 1);
+	assert(rind >= ind);
 #if NOSERIAL
 	memcpy(v, &rdata[rind], sizeof(uint8_t));
 #else
@@ -985,7 +1025,7 @@ darray_uint16_get(const struct darray *d, const size_t ind, void *v)
 	assert(d != NULL);
 	assert(d->data != NULL);
 	assert(v != NULL);
-	assert(ind > 0);
+	assert(ind >= 0);
 
 	assert(d->use <= d->cap);
 	assert(ind <= d->use);
@@ -1044,7 +1084,7 @@ darray_uint32_get(const struct darray *d, const size_t ind, void *v)
 	assert(d != NULL);
 	assert(d->data != NULL);
 	assert(v != NULL);
-	assert(ind > 0);
+	assert(ind >= 0);
 
 	assert(d->use <= d->cap);
 	assert(ind <= d->use);
@@ -1109,7 +1149,7 @@ darray_uint64_get(const struct darray *d, const size_t ind, void *v)
 	assert(d != NULL);
 	assert(d->data != NULL);
 	assert(v != NULL);
-	assert(ind > 0);
+	assert(ind >= 0);
 
 	assert(d->use <= d->cap);
 	assert(ind <= d->use);
@@ -1168,7 +1208,7 @@ static void darray_bset_get(const struct darray *d, const size_t ind, void *v)
 	assert(d != NULL);
 	assert(d->data != NULL);
 	assert(v != NULL);
-	assert(ind > 0);
+	assert(ind >= 0);
 
 	assert(d->use <= d->cap);
 	assert(ind <= d->use);
@@ -1228,9 +1268,9 @@ int main(void)
 	int rc = 0;
 	struct darray d;
 
-	enum VALUE_TYPE t = UNSIGNED_INT;
-	//enum VALUE_TYPE t = BITSET;
-	size_t vs = sizeof(uint64_t);
+	//enum VALUE_TYPE t = UNSIGNED_INT;
+	enum VALUE_TYPE t = BITSET;
+	size_t vs = sizeof(uint8_t);
 
 	if ((rc = darray_init(&d, 0, &t, &vs,
 		"/Users/nick/scratch/mmap_dynamic_array", "test", "eves")) != SUCCESS) {
@@ -1238,7 +1278,7 @@ int main(void)
 		goto fail_darray_init;
 	}
 
-	for (uint64_t i = 0; i < 10000000; ++i) {
+	for (uint64_t i = 0; i < 10000; ++i) {
 		if ((rc = d.push(&d, &i)) != SUCCESS) {
 			printf("Error: %s\n", darray_strerror(rc));
 			goto fail_darray_append;
